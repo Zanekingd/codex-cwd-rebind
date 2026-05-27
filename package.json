@@ -1,0 +1,91 @@
+{
+  "name": "codex-cwd-rebind",
+  "displayName": "Codex CWD Rebind",
+  "description": "Inspect and safely rebind local OpenAI Codex session cwd metadata from VS Code.",
+  "version": "0.1.4",
+  "publisher": "zane",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Zanekingd/codex-cwd-rebind.git"
+  },
+  "files": [
+    "out",
+    "media",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:codexCwdRebind.sessionsView",
+    "onCommand:codexCwdRebind.refreshSessions"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codexCwdRebind",
+          "title": "Codex CWD",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codexCwdRebind": [
+        {
+          "id": "codexCwdRebind.sessionsView",
+          "name": "Sessions",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "codexCwdRebind.refreshSessions",
+        "title": "Refresh Sessions",
+        "category": "Codex CWD",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "codexCwdRebind.refreshSessions",
+          "when": "view == codexCwdRebind.sessionsView",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "codexCwdRebind.refreshSessions"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p ./",
+    "build": "tsc -p ./",
+    "smoke": "npm run build && node scripts/smoke-test.mjs",
+    "test": "npm run check && npm run smoke",
+    "package": "npm run build && vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.96.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^5.7.2"
+  },
+  "keywords": [
+    "codex",
+    "cwd",
+    "vscode",
+    "session",
+    "workspace"
+  ]
+}
