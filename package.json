@@ -2,7 +2,7 @@
   "name": "codex-cwd-rebind",
   "displayName": "Codex CWD Rebind",
   "description": "Inspect and safely rebind local OpenAI Codex session cwd metadata from VS Code.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "zane",
   "license": "MIT",
   "repository": {
