@@ -2,7 +2,17 @@
 
 Inspect and safely rebind local OpenAI Codex session `cwd` metadata from VS Code.
 
+中文文档: [README.zh-CN.md](README.zh-CN.md)
+
 This is an unofficial local metadata editor. It is Linux-first and tested against the local Codex data layout under `~/.codex`.
+
+## Install
+
+Download the latest `.vsix` from GitHub Releases, then install it in VS Code:
+
+1. Open Extensions.
+2. Choose `Install from VSIX...`.
+3. Select `codex-cwd-rebind-*.vsix`.
 
 ## What It Does
 
