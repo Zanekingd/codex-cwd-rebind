@@ -17,6 +17,9 @@ const MUTATION_LOG_NAME = "mutations.jsonl";
 const LIST_LAYOUT_KEY = "codexCwdRebind.listLayout";
 const COLLAPSED_PROJECTS_KEY = "codexCwdRebind.collapsedProjects";
 const MAX_THREAD_TITLES = 500;
+const O_ACCMODE = 0o3;
+const O_WRONLY = 0o1;
+const O_RDWR = 0o2;
 
 interface SessionSummary {
   id: string;
@@ -75,6 +78,14 @@ interface SessionGroup {
   cwd: string;
   sessions: SessionSummary[];
   collapsed: boolean;
+}
+
+interface RolloutWriter {
+  pid: number;
+  fd: string;
+  flags: string;
+  command: string;
+  exe: string | null;
 }
 
 interface ThreadRow {
@@ -815,6 +826,7 @@ order by coalesce(t.updated_at_ms, t.updated_at * 1000) desc
     if (!targetStat.isDirectory()) {
       throw new Error(`Target cwd is not a directory: ${targetCwd}`);
     }
+    await assertRolloutHasNoWriters(session.rolloutPath);
 
     const inspection = await inspectRolloutCwd(
       session.rolloutPath,
@@ -848,6 +860,7 @@ order by coalesce(t.updated_at_ms, t.updated_at * 1000) desc
   }
 
   public async applyRebind(plan: RebindPlan): Promise<MutationRecord> {
+    await assertRolloutHasNoWriters(plan.rolloutPath);
     const backupDir = await this.createBackup(plan);
     try {
       await updateThreadCwd(this.stateDbPath, plan.sessionId, plan.toCwd);
@@ -1024,6 +1037,130 @@ async function runSqliteJson<T>(
   }
   const output = stdout.trim();
   return (output ? JSON.parse(output) : []) as T;
+}
+
+async function assertRolloutHasNoWriters(rolloutPath: string): Promise<void> {
+  const writers = await findRolloutWriters(rolloutPath);
+  if (writers.length === 0) {
+    return;
+  }
+  throw new Error(formatActiveRolloutWritersError(rolloutPath, writers));
+}
+
+export async function findRolloutWriters(rolloutPath: string): Promise<RolloutWriter[]> {
+  if (process.platform !== "linux") {
+    return [];
+  }
+
+  const target = await fs.stat(rolloutPath);
+  const procEntries = await fs.readdir("/proc", { withFileTypes: true }).catch(() => []);
+  const writers: RolloutWriter[] = [];
+
+  for (const entry of procEntries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) {
+      continue;
+    }
+
+    const pid = Number(entry.name);
+    const fdDir = path.join("/proc", entry.name, "fd");
+    const fdEntries = await fs.readdir(fdDir, { withFileTypes: true }).catch(() => []);
+    for (const fdEntry of fdEntries) {
+      const fdPath = path.join(fdDir, fdEntry.name);
+      let fdStat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        fdStat = await fs.stat(fdPath);
+      } catch {
+        continue;
+      }
+      if (fdStat.dev !== target.dev || fdStat.ino !== target.ino) {
+        continue;
+      }
+
+      const flags = await readProcFdFlags(pid, fdEntry.name);
+      if (!flags || !fdFlagsAreWritable(flags)) {
+        continue;
+      }
+
+      writers.push({
+        pid,
+        fd: fdEntry.name,
+        flags,
+        command: await readProcCommand(pid),
+        exe: await readProcExe(pid)
+      });
+    }
+  }
+
+  return writers.sort((first, second) => first.pid - second.pid);
+}
+
+async function readProcFdFlags(pid: number, fd: string): Promise<string | null> {
+  try {
+    const fdInfo = await fs.readFile(path.join("/proc", String(pid), "fdinfo", fd), "utf8");
+    const match = /^flags:\s*(\S+)/m.exec(fdInfo);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function fdFlagsAreWritable(flags: string): boolean {
+  const parsed = Number.parseInt(flags, 8);
+  if (Number.isNaN(parsed)) {
+    return false;
+  }
+  const accessMode = parsed & O_ACCMODE;
+  return accessMode === O_WRONLY || accessMode === O_RDWR;
+}
+
+async function readProcCommand(pid: number): Promise<string> {
+  try {
+    const raw = await fs.readFile(path.join("/proc", String(pid), "cmdline"));
+    const command = raw
+      .toString("utf8")
+      .split("\0")
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    return command || `pid ${pid}`;
+  } catch {
+    return `pid ${pid}`;
+  }
+}
+
+async function readProcExe(pid: number): Promise<string | null> {
+  try {
+    return await fs.readlink(path.join("/proc", String(pid), "exe"));
+  } catch {
+    return null;
+  }
+}
+
+function formatActiveRolloutWritersError(
+  rolloutPath: string,
+  writers: RolloutWriter[]
+): string {
+  const writerLines = writers
+    .slice(0, 5)
+    .map((writer) => {
+      const exe = writer.exe ? ` exe=${writer.exe}` : "";
+      return `PID ${writer.pid} fd ${writer.fd} flags ${writer.flags}${exe}\n  ${writer.command}`;
+    });
+  const omitted = writers.length > writerLines.length
+    ? [`... ${writers.length - writerLines.length} more writer(s) omitted.`]
+    : [];
+  return [
+    "This Codex session appears to be active.",
+    "",
+    "Rebinding while Codex holds the rollout JSONL open for writing can cause future messages to be written to a stale file descriptor and disappear after restart.",
+    "",
+    `Rollout: ${rolloutPath}`,
+    "",
+    ...writerLines,
+    ...omitted,
+    "",
+    "Close or reload the Codex session/backend, then retry."
+  ].join("\n");
 }
 
 async function updateThreadCwd(

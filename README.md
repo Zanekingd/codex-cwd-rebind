@@ -51,4 +51,6 @@ Before each write, the extension copies `state_5.sqlite`, existing WAL/SHM files
 
 The extension never applies changes automatically. Every rebind requires preview and user confirmation.
 
+The extension refuses to rebind an active session when the rollout JSONL is open for writing by another process. Close or reload the Codex session/backend before retrying. This avoids stale file-descriptor writes that can make later messages disappear after restart.
+
 Thread rename does not create a backup. It updates `threads.title`, appends to `session_index.jsonl`, appends a `thread_name_updated` event to the rollout JSONL, and updates `.codex-global-state.json`.

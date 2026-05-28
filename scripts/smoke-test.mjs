@@ -125,6 +125,7 @@ insert into thread_spawn_edges values('thread-main','thread-child','completed');
   process.env.CODEX_HOME = codexHome;
   const {
     CodexCwdService,
+    findRolloutWriters,
     groupSessionsByCwd,
     matchesOfficialActiveSession,
     renderMain
@@ -214,6 +215,22 @@ insert into thread_spawn_edges values('thread-main','thread-child','completed');
   );
   assert(globalState.untouched === true, "expected global-state unrelated data to survive");
 
+  const writerHandle = await fs.open(rolloutPath, "a");
+  try {
+    const writers = await findRolloutWriters(rolloutPath);
+    assert(
+      writers.some((writer) => writer.pid === process.pid),
+      "expected active rollout writer detection"
+    );
+    await assertRejectsContaining(
+      () => service.buildRebindPlan(main, targetCwd),
+      "This Codex session appears to be active.",
+      "expected active writer to block rebind planning"
+    );
+  } finally {
+    await writerHandle.close();
+  }
+
   const plan = await service.buildRebindPlan(main, targetCwd);
   assert(plan.wouldUpdateSessionMeta === true, "expected session_meta update");
   assert(plan.wouldUpdateTurnContexts === 2, "expected both turn_context rows to update");
@@ -261,6 +278,19 @@ async function assertRejects(callback, expectedMessage, message) {
     await callback();
   } catch (error) {
     assert(error.message === expectedMessage, `${message}: ${error.message}`);
+    return;
+  }
+  throw new Error(message);
+}
+
+async function assertRejectsContaining(callback, expectedMessagePart, message) {
+  try {
+    await callback();
+  } catch (error) {
+    assert(
+      error.message.includes(expectedMessagePart),
+      `${message}: ${error.message}`
+    );
     return;
   }
   throw new Error(message);

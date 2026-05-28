@@ -46,6 +46,8 @@ Codex 会话的项目归属依赖本地元信息。如果旧会话的全局 `cwd
 - 如果存在，备份 `state_5.sqlite-shm`
 - 当前会话对应的 rollout JSONL
 
+如果目标会话仍在运行，且 Codex 后端正以写模式打开该 rollout JSONL，扩展会拒绝执行重绑。请先关闭或重载对应 Codex 会话/后端，再重新操作。这样可以避免 Codex 后续消息继续写入旧文件描述符，导致重启后消息丢失。
+
 重命名会话不会创建备份。它会更新：
 
 - `state_5.sqlite` 的 `threads.title`
