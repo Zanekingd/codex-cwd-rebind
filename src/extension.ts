@@ -20,6 +20,7 @@ const MAX_THREAD_TITLES = 500;
 const O_ACCMODE = 0o3;
 const O_WRONLY = 0o1;
 const O_RDWR = 0o2;
+const ACTIVE_ROLLOUT_WRITERS_ERROR = "ActiveRolloutWritersError";
 
 interface SessionSummary {
   id: string;
@@ -86,6 +87,16 @@ interface RolloutWriter {
   flags: string;
   command: string;
   exe: string | null;
+}
+
+class ActiveRolloutWritersError extends Error {
+  public constructor(
+    public readonly rolloutPath: string,
+    public readonly writers: RolloutWriter[]
+  ) {
+    super(formatActiveRolloutWritersError(rolloutPath, writers));
+    this.name = ACTIVE_ROLLOUT_WRITERS_ERROR;
+  }
 }
 
 interface ThreadRow {
@@ -238,32 +249,72 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
     }
 
     try {
-      const plan = await this.service.buildRebindPlan(session, target);
-      const detail = [
-        `Session: ${session.title || session.id}`,
-        `From: ${plan.fromCwd}`,
-        `To: ${plan.toCwd}`,
-        `Update session_meta: ${plan.wouldUpdateSessionMeta ? "yes" : "no"}`,
-        `Update turn_context rows: ${plan.wouldUpdateTurnContexts}`,
-        "",
-        "Backups will be created before writing."
-      ].join("\n");
-      const choice = await vscode.window.showWarningMessage(
-        "Apply Codex cwd rebind?",
-        { modal: true, detail },
-        "Apply Rebind"
-      );
-      if (choice !== "Apply Rebind") {
-        return;
+      const completed = await this.tryRebindSession(session, target);
+      if (completed) {
+        await this.refresh();
       }
-
-      const mutation = await this.service.applyRebind(plan);
-      await this.refresh();
-      void vscode.window.showInformationMessage(
-        `Rebound cwd for ${session.title || session.id}. Backup: ${mutation.backupDir}`
-      );
     } catch (error) {
-      void vscode.window.showErrorMessage(getErrorMessage(error));
+      const activeWriterError = asActiveRolloutWritersError(error);
+      if (activeWriterError) {
+        await this.handleActiveRolloutWriters(activeWriterError);
+      } else {
+        void vscode.window.showErrorMessage(getErrorMessage(error));
+      }
+    }
+  }
+
+  private async tryRebindSession(
+    session: SessionSummary,
+    target: string
+  ): Promise<boolean> {
+    const plan = await this.service.buildRebindPlan(session, target);
+    const detail = [
+      `Session: ${session.title || session.id}`,
+      `From: ${plan.fromCwd}`,
+      `To: ${plan.toCwd}`,
+      `Update session_meta: ${plan.wouldUpdateSessionMeta ? "yes" : "no"}`,
+      `Update turn_context rows: ${plan.wouldUpdateTurnContexts}`,
+      "",
+      "Backups will be created before writing."
+    ].join("\n");
+    const choice = await vscode.window.showWarningMessage(
+      "Apply Codex cwd rebind?",
+      { modal: true, detail },
+      "Apply Rebind"
+    );
+    if (choice !== "Apply Rebind") {
+      return false;
+    }
+
+    const mutation = await this.service.applyRebind(plan);
+    void vscode.window.showInformationMessage(
+      `Rebound cwd for ${session.title || session.id}. Backup: ${mutation.backupDir}`
+    );
+    return true;
+  }
+
+  private async handleActiveRolloutWriters(
+    error: ActiveRolloutWritersError
+  ): Promise<void> {
+    while (true) {
+      const choice = await vscode.window.showErrorMessage(
+        "This Codex session is currently active",
+        {
+          modal: true,
+          detail: formatActiveRolloutWritersDialogDetail(
+            error.rolloutPath,
+            error.writers
+          )
+        },
+        "Copy Details"
+      );
+
+      if (choice === "Copy Details") {
+        await vscode.env.clipboard.writeText(error.message);
+        void vscode.window.showInformationMessage("Copied active session details.");
+        continue;
+      }
+      return;
     }
   }
 
@@ -1021,6 +1072,20 @@ order by coalesce(t.updated_at_ms, t.updated_at * 1000) desc
   }
 }
 
+function asActiveRolloutWritersError(
+  error: unknown
+): ActiveRolloutWritersError | null {
+  const candidate = error as Partial<ActiveRolloutWritersError> | null;
+  if (
+    candidate?.name === ACTIVE_ROLLOUT_WRITERS_ERROR &&
+    typeof candidate.rolloutPath === "string" &&
+    Array.isArray(candidate.writers)
+  ) {
+    return candidate as ActiveRolloutWritersError;
+  }
+  return null;
+}
+
 async function runSqliteJson<T>(
   dbPath: string,
   sql: string,
@@ -1044,7 +1109,7 @@ async function assertRolloutHasNoWriters(rolloutPath: string): Promise<void> {
   if (writers.length === 0) {
     return;
   }
-  throw new Error(formatActiveRolloutWritersError(rolloutPath, writers));
+  throw new ActiveRolloutWritersError(rolloutPath, writers);
 }
 
 export async function findRolloutWriters(rolloutPath: string): Promise<RolloutWriter[]> {
@@ -1160,6 +1225,27 @@ function formatActiveRolloutWritersError(
     ...omitted,
     "",
     "Close or reload the Codex session/backend, then retry."
+  ].join("\n");
+}
+
+function formatActiveRolloutWritersDialogDetail(
+  rolloutPath: string,
+  writers: RolloutWriter[]
+): string {
+  const writerSummary = writers.length === 1
+    ? `Writer: PID ${writers[0].pid}`
+    : `Writers: ${writers.map((writer) => writer.pid).slice(0, 3).join(", ")}${writers.length > 3 ? ", ..." : ""}`;
+  return [
+    "Codex is still writing this session's rollout file.",
+    "Rebind is blocked to prevent later messages from disappearing after restart.",
+    "",
+    "Recommended:",
+    "1. Do not continue chatting in this thread.",
+    "2. Run Developer: Reload Window, or close the Codex backend/session.",
+    "3. Rebind again before resuming the thread.",
+    "",
+    writerSummary,
+    "Use Copy Details for rollout path, fd, exe, and command."
   ].join("\n");
 }
 
