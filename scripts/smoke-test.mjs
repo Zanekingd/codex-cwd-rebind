@@ -183,7 +183,8 @@ insert into thread_spawn_edges values('thread-main','thread-child','completed');
   assert(groupedHtml.includes("data-project-group"), "expected searchable project groups");
   const collapsedGroupedHtml = renderMain(sessions, "archived", "project", new Set(["/archived/workspace"]));
   assert(collapsedGroupedHtml.includes("Older Archived Thread"), "expected collapsed project search data to include titles");
-  assert(!collapsedGroupedHtml.includes('class="title">Older Archived Thread</div>'), "expected collapsed project rows not to render");
+  assert(collapsedGroupedHtml.includes('class="title">Older Archived Thread</div>'), "expected collapsed project rows for local expand");
+  assert(collapsedGroupedHtml.includes('<div class="project-sessions" hidden>'), "expected collapsed project rows to stay hidden");
 
   await assertRejects(
     () => service.buildRenamePlan(main, "   "),

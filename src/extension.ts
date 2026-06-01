@@ -123,7 +123,7 @@ type ViewMessage =
   | { type: "inspect"; sessionId: string }
   | { type: "mode"; mode: ViewMode }
   | { type: "layout"; layout: ListLayout }
-  | { type: "toggleProject"; cwd: string }
+  | { type: "toggleProject"; cwd: string; collapsed?: boolean }
   | { type: "showMore" };
 
 type ViewMode = "active" | "archived";
@@ -179,20 +179,22 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage((message: ViewMessage) => {
       void this.handleMessage(message);
     });
-    this.render();
     void this.refresh();
   }
 
   public async refresh(): Promise<void> {
     this.isLoading = true;
     this.lastError = null;
-    this.render();
+    const loadingTimer = setTimeout(() => {
+      this.render();
+    }, 150);
     try {
       this.sessions = await this.service.scanSessions();
     } catch (error) {
       this.sessions = [];
       this.lastError = getErrorMessage(error);
     } finally {
+      clearTimeout(loadingTimer);
       this.isLoading = false;
       this.render();
     }
@@ -222,7 +224,7 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         this.render();
         return;
       case "toggleProject":
-        await this.toggleProject(message.cwd);
+        await this.setProjectCollapsed(message.cwd, message.collapsed);
         return;
       case "showMore":
         this.archivedRenderLimit += ARCHIVED_PAGE_SIZE;
@@ -366,17 +368,22 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async toggleProject(cwd: string): Promise<void> {
-    if (this.collapsedProjects.has(cwd)) {
-      this.collapsedProjects.delete(cwd);
-    } else {
+  private async setProjectCollapsed(
+    cwd: string,
+    collapsed: boolean | undefined
+  ): Promise<void> {
+    const shouldCollapse = typeof collapsed === "boolean"
+      ? collapsed
+      : !this.collapsedProjects.has(cwd);
+    if (shouldCollapse) {
       this.collapsedProjects.add(cwd);
+    } else {
+      this.collapsedProjects.delete(cwd);
     }
     await this.context.globalState.update(
       COLLAPSED_PROJECTS_KEY,
       Array.from(this.collapsedProjects)
     );
-    this.render();
   }
 
   private getVisibleSessions(): SessionSummary[] {
@@ -780,7 +787,22 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         }
         const project = target?.closest("[data-toggle-project]");
         if (project) {
-          vscode.postMessage({ type: "toggleProject", cwd: project.dataset.toggleProject });
+          const group = project.closest("[data-project-group]");
+          const shouldCollapse = group?.dataset.collapsed !== "true";
+          if (group) {
+            group.dataset.collapsed = shouldCollapse ? "true" : "false";
+            project.setAttribute("aria-expanded", shouldCollapse ? "false" : "true");
+            group.querySelector(".project-chevron")?.classList.toggle("expanded", !shouldCollapse);
+            const sessions = group.querySelector(".project-sessions");
+            if (sessions) {
+              sessions.hidden = (search?.value || "").trim() ? false : shouldCollapse;
+            }
+          }
+          vscode.postMessage({
+            type: "toggleProject",
+            cwd: project.dataset.toggleProject,
+            collapsed: shouldCollapse
+          });
           return;
         }
         if (target?.closest("[data-show-more]")) {
@@ -1717,16 +1739,14 @@ export function renderMain(
 function renderProjectGroups(groups: SessionGroup[], mode: ViewMode): string {
   return groups
     .map((group) => {
-      const sessions = group.collapsed
-        ? ""
-        : group.sessions.map((session) => renderSession(session, mode)).join("");
+      const sessions = group.sessions.map((session) => renderSession(session, mode)).join("");
       const searchText = buildSearchText([
         group.cwd,
         ...group.sessions.flatMap((session) => getSessionSearchParts(session))
       ]);
       return `
         <section class="project-group" data-project-group data-collapsed="${group.collapsed ? "true" : "false"}" data-search="${escapeHtml(searchText)}">
-          <button class="project-header" data-toggle-project="${escapeHtml(group.cwd)}" title="${escapeHtml(group.cwd)}">
+          <button class="project-header" data-toggle-project="${escapeHtml(group.cwd)}" title="${escapeHtml(group.cwd)}" aria-expanded="${group.collapsed ? "false" : "true"}">
             <span class="project-chevron ${group.collapsed ? "" : "expanded"}" aria-hidden="true">
               <svg viewBox="0 0 16 16" focusable="false">
                 <path fill="currentColor" d="M6 4l4 4-4 4z"></path>
