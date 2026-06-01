@@ -106,18 +106,20 @@ create table threads(
   updated_at integer,
   updated_at_ms integer,
   archived integer,
+  archived_at integer,
   agent_role text,
   agent_path text
 );
 create table thread_spawn_edges(parent_thread_id text, child_thread_id text, status text);
 insert into threads values('thread-main','**Main**
-Thread','ignored first','ignored preview','vscode','aixj','/old/workspace','${rolloutRel}',1,1000,0,null,null);
+Thread','ignored first','ignored preview','vscode','aixj','/old/workspace','${rolloutRel}',1,1000,0,null,null,null);
 insert into threads values('thread-second','','Second
-Thread','ignored preview','vscode','aixj','/old/workspace','${rolloutRel}',1,950,0,null,null);
-insert into threads values('thread-child','Child Thread','ignored first','ignored preview','vscode','aixj','/old/workspace','${rolloutRel}',1,900,0,null,null);
-insert into threads values('thread-openai','OpenAI Thread','ignored first','ignored preview','vscode','openai','/old/workspace','${rolloutRel}',1,800,0,null,null);
-insert into threads values('thread-remote','Remote Thread','ignored first','ignored preview','remote','aixj','/old/workspace','${rolloutRel}',1,700,0,null,null);
-insert into threads values('thread-archived','Archived Thread','ignored first','ignored preview','vscode','aixj','/archived/workspace','${archivedRolloutRel}',1,1100,1,null,null);
+Thread','ignored preview','vscode','aixj','/old/workspace','${rolloutRel}',1,950,0,null,null,null);
+insert into threads values('thread-child','Child Thread','ignored first','ignored preview','vscode','aixj','/old/workspace','${rolloutRel}',1,900,0,null,null,null);
+insert into threads values('thread-openai','OpenAI Thread','ignored first','ignored preview','vscode','openai','/old/workspace','${rolloutRel}',1,800,0,null,null,null);
+insert into threads values('thread-remote','Remote Thread','ignored first','ignored preview','remote','aixj','/old/workspace','${rolloutRel}',1,700,0,null,null,null);
+insert into threads values('thread-archived','Archived Thread','ignored first','ignored preview','vscode','aixj','/archived/workspace','${archivedRolloutRel}',4102444800,4102444800000,1,3,null,null);
+insert into threads values('thread-older-archive','Older Archived Thread','ignored first','ignored preview','vscode','aixj','/archived/workspace','${archivedRolloutRel}',99,99000,1,2,null,null);
 insert into thread_spawn_edges values('thread-main','thread-child','completed');
     `.trim()
   ]);
@@ -135,34 +137,53 @@ insert into thread_spawn_edges values('thread-main','thread-child','completed');
   });
 
   const sessions = await service.scanSessions();
-  assert(sessions.length === 5, `expected five non-subagent sessions, got ${sessions.length}`);
+  assert(sessions.length === 6, `expected six non-subagent sessions, got ${sessions.length}`);
   const main = findSession(sessions, "thread-main");
   const second = findSession(sessions, "thread-second");
   const archived = findSession(sessions, "thread-archived");
-  assert(sessions[0].id === "thread-archived", "expected newest archived thread to sort first");
+  const olderArchive = findSession(sessions, "thread-older-archive");
+  assert(sessions[0].id === "thread-archived", "expected newest archived_at thread to sort first");
+  assert(
+    sessions.indexOf(archived) < sessions.indexOf(olderArchive),
+    "expected archived_at to sort before updated_at_ms for archived threads"
+  );
   assert(main.title === "Official Indexed Thread", "expected session index thread_name to win");
   assert(second.title === "Cached Second Thread", "expected global-state thread title before first message");
-  assert(main.metaCwd === "/old/workspace", "expected session_meta cwd");
+  assert(main.metaCwd === null, "expected scan to avoid rollout reads for list performance");
+  assert(archived.archivedAt === "1970-01-01T00:00:03.000Z", "expected archived_at seconds to normalize to ISO");
   assert(archived.archived === true, "expected archived flag to be preserved");
   assert(
     sessions.filter((session) => !session.archived && matchesOfficialActiveSession(session)).length === 2,
     "expected only official-active sessions to match the official UI filter"
   );
 
-  const groups = groupSessionsByCwd(sessions, new Set(["/archived/workspace"]));
+  const groups = groupSessionsByCwd(sessions, "archived", new Set(["/archived/workspace"]));
   assert(groups[0].cwd === "/archived/workspace", "expected newest cwd group first");
   assert(groups[0].collapsed === true, "expected collapsed project state");
   assert(
-    groups.find((group) => group.cwd === "/old/workspace")?.sessions.map((session) => session.id).join(",") ===
+    groupSessionsByCwd(sessions, "active")
+      .find((group) => group.cwd === "/old/workspace")?.sessions.map((session) => session.id).join(",") ===
       "thread-main,thread-second,thread-openai,thread-remote",
     "expected sessions within cwd group to sort by recent update"
   );
 
   const archivedHtml = renderMain([archived], "archived", "recent", new Set());
   assert(archivedHtml.includes("Archived Thread"), "expected archived title to render");
+  assert(archivedHtml.includes("1970"), "expected archived view to show archived_at");
+  assert(!archivedHtml.includes("2100"), "expected archived view not to show updated_at");
   assert(!archivedHtml.includes("[Archived]"), "expected archived title without prefix");
+  assert(archivedHtml.includes("data-session-row"), "expected searchable session rows");
+  assert(archivedHtml.includes("data-search="), "expected local search index attributes");
+  const pagedArchivedHtml = renderMain([archived, olderArchive], "archived", "recent", new Set(), 1);
+  assert(pagedArchivedHtml.includes("1 of 2 archived sessions shown"), "expected archived pagination count");
+  assert(pagedArchivedHtml.includes("Show 1 more"), "expected archived show-more button");
+  assert(!pagedArchivedHtml.includes("Older Archived Thread"), "expected archived pagination to omit later rows");
   const groupedHtml = renderMain(sessions, "active", "project", new Set());
   assert(groupedHtml.includes("/old/workspace"), "expected project layout to show full cwd");
+  assert(groupedHtml.includes("data-project-group"), "expected searchable project groups");
+  const collapsedGroupedHtml = renderMain(sessions, "archived", "project", new Set(["/archived/workspace"]));
+  assert(collapsedGroupedHtml.includes("Older Archived Thread"), "expected collapsed project search data to include titles");
+  assert(!collapsedGroupedHtml.includes('class="title">Older Archived Thread</div>'), "expected collapsed project rows not to render");
 
   await assertRejects(
     () => service.buildRenamePlan(main, "   "),

@@ -17,6 +17,7 @@ const MUTATION_LOG_NAME = "mutations.jsonl";
 const LIST_LAYOUT_KEY = "codexCwdRebind.listLayout";
 const COLLAPSED_PROJECTS_KEY = "codexCwdRebind.collapsedProjects";
 const MAX_THREAD_TITLES = 500;
+const ARCHIVED_PAGE_SIZE = 80;
 const O_ACCMODE = 0o3;
 const O_WRONLY = 0o1;
 const O_RDWR = 0o2;
@@ -31,6 +32,7 @@ interface SessionSummary {
   metaCwd: string | null;
   rolloutPath: string;
   updatedAt: string | null;
+  archivedAt: string | null;
   archived: boolean;
   isSubagent: boolean;
 }
@@ -109,19 +111,20 @@ interface ThreadRow {
   sqliteCwd: string;
   rolloutPath: string;
   updatedAtMs: number | null;
+  archivedAtMs: number | null;
   archived: number;
   isSubagent: number;
 }
 
 type ViewMessage =
   | { type: "refresh" }
-  | { type: "search"; query: string }
   | { type: "rebind"; sessionId: string }
   | { type: "rename"; sessionId: string; title: string }
   | { type: "inspect"; sessionId: string }
   | { type: "mode"; mode: ViewMode }
   | { type: "layout"; layout: ListLayout }
-  | { type: "toggleProject"; cwd: string };
+  | { type: "toggleProject"; cwd: string }
+  | { type: "showMore" };
 
 type ViewMode = "active" | "archived";
 type ListLayout = "recent" | "project";
@@ -148,10 +151,10 @@ export function deactivate(): void {
 class SessionsViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private sessions: SessionSummary[] = [];
-  private searchQuery = "";
   private mode: ViewMode = "active";
   private layout: ListLayout;
   private collapsedProjects: Set<string>;
+  private archivedRenderLimit = ARCHIVED_PAGE_SIZE;
   private isLoading = false;
   private lastError: string | null = null;
 
@@ -200,10 +203,6 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
       case "refresh":
         await this.refresh();
         return;
-      case "search":
-        this.searchQuery = message.query.trim();
-        this.render();
-        return;
       case "rebind":
         await this.rebindSession(message.sessionId);
         return;
@@ -224,6 +223,10 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         return;
       case "toggleProject":
         await this.toggleProject(message.cwd);
+        return;
+      case "showMore":
+        this.archivedRenderLimit += ARCHIVED_PAGE_SIZE;
+        this.render();
         return;
     }
   }
@@ -382,21 +385,12 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         ? session.archived
         : !session.archived && matchesOfficialActiveSession(session)
     );
-    const query = this.searchQuery.toLowerCase();
-    if (!query) {
-      return modeMatches;
-    }
-    return modeMatches.filter((session) =>
-      [
-        session.id,
-        session.title,
-        session.sqliteCwd,
-        session.metaCwd,
-        session.rolloutPath
-      ]
-        .filter((value): value is string => Boolean(value))
-        .some((value) => value.toLowerCase().includes(query))
-    );
+    return modeMatches
+      .slice()
+      .sort(
+        (first, second) =>
+          sessionTimeMs(second, this.mode) - sessionTimeMs(first, this.mode)
+      );
   }
 
   private render(): void {
@@ -415,12 +409,13 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
       : this.lastError
         ? renderState("Failed to load sessions", this.lastError)
         : visibleSessions.length === 0
-          ? renderState("No sessions found", "Try refreshing or clearing search.")
+          ? renderState("No sessions found", "Try refreshing.")
           : renderMain(
               visibleSessions,
               this.mode,
               this.layout,
-              this.collapsedProjects
+              this.collapsedProjects,
+              this.getRenderLimit()
             );
 
     return `<!DOCTYPE html>
@@ -517,6 +512,10 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         background: var(--vscode-button-secondaryBackground);
         color: var(--vscode-button-secondaryForeground);
       }
+      .show-more {
+        width: 100%;
+        margin: 6px 0 10px;
+      }
       .session-row {
         position: relative;
         margin: 0 0 6px;
@@ -528,7 +527,7 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         background: transparent;
         color: inherit;
         display: flex;
-        align-items: flex-start;
+        align-items: center;
         gap: 8px;
         padding: 8px;
         text-align: left;
@@ -542,9 +541,15 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         flex: 1;
       }
       .menu-trigger {
+        align-items: center;
+        align-self: center;
+        display: inline-flex;
         flex: 0 0 auto;
+        height: 26px;
+        justify-content: center;
+        line-height: 1;
         min-width: 28px;
-        padding: 2px 7px;
+        padding: 0 7px;
         background: transparent;
         color: var(--muted);
       }
@@ -585,18 +590,38 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         margin: 0 0 8px;
       }
       .project-header {
+        align-items: center;
         width: 100%;
         border: 0;
+        border-radius: 4px;
         background: transparent;
         color: var(--muted);
         display: flex;
-        gap: 6px;
-        padding: 6px 2px;
+        gap: 4px;
+        min-height: 22px;
+        padding: 3px 2px;
         text-align: left;
       }
       .project-header:hover {
         color: var(--fg);
-        background: transparent;
+        background: var(--vscode-list-hoverBackground, transparent);
+      }
+      .project-chevron {
+        align-items: center;
+        color: var(--vscode-icon-foreground, var(--muted));
+        display: inline-flex;
+        flex: 0 0 16px;
+        height: 16px;
+        justify-content: center;
+        width: 16px;
+      }
+      .project-chevron svg {
+        display: block;
+        height: 14px;
+        width: 14px;
+      }
+      .project-chevron.expanded svg {
+        transform: rotate(90deg);
       }
       .project-title {
         min-width: 0;
@@ -620,6 +645,9 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         background: var(--panel);
         margin-top: 12px;
         padding: 10px;
+      }
+      [data-filter-hidden="true"] {
+        display: none;
       }
       .rename-overlay {
         position: fixed;
@@ -674,7 +702,7 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
       </div>
     </div>
     <div class="toolbar">
-      <input id="search" value="${escapeHtml(this.searchQuery)}" placeholder="Search title, cwd, id, rollout" />
+      <input id="search" value="" placeholder="Search title, cwd, id, rollout" />
       <button class="secondary" id="refresh">Refresh</button>
     </div>
     ${body}
@@ -696,52 +724,70 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
       const renameInput = document.getElementById("renameInput");
       let renameSessionId = "";
       let searchTimer;
-      search?.addEventListener("input", (event) => {
+      let isComposingSearch = false;
+      const scheduleFilter = () => {
         clearTimeout(searchTimer);
         searchTimer = setTimeout(() => {
-          vscode.postMessage({ type: "search", query: event.target.value });
-        }, 120);
+          filterSessions(search?.value || "");
+        }, 240);
+      };
+      search?.addEventListener("compositionstart", () => {
+        isComposingSearch = true;
+        clearTimeout(searchTimer);
+      });
+      search?.addEventListener("compositionend", () => {
+        isComposingSearch = false;
+        scheduleFilter();
+      });
+      search?.addEventListener("input", (event) => {
+        if (isComposingSearch || event.isComposing) return;
+        scheduleFilter();
       });
       document.getElementById("refresh")?.addEventListener("click", () => {
         vscode.postMessage({ type: "refresh" });
       });
-      document.querySelectorAll("[data-menu]").forEach((element) => {
-        element.addEventListener("click", () => {
-          const panel = document.querySelector('[data-menu-panel="' + element.dataset.menu + '"]');
+      document.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        const menuTrigger = target?.closest("[data-menu]");
+        if (menuTrigger) {
+          const panel = document.querySelector('[data-menu-panel="' + menuTrigger.dataset.menu + '"]');
           document.querySelectorAll("[data-menu-panel]").forEach((candidate) => {
             if (candidate !== panel) candidate.hidden = true;
           });
           if (panel) panel.hidden = !panel.hidden;
-        });
-      });
-      document.querySelectorAll("[data-action]").forEach((element) => {
-        element.addEventListener("click", () => {
-          const sessionId = element.dataset.sessionId;
+          return;
+        }
+        const action = target?.closest("[data-action]");
+        if (action) {
+          const sessionId = action.dataset.sessionId;
           document.querySelectorAll("[data-menu-panel]").forEach((panel) => { panel.hidden = true; });
-          if (element.dataset.action === "rename") {
-            openRenameDialog(sessionId, element.dataset.sessionTitle || "");
+          if (action.dataset.action === "rename") {
+            openRenameDialog(sessionId, action.dataset.sessionTitle || "");
             return;
           }
-          vscode.postMessage({ type: element.dataset.action, sessionId });
-        });
-      });
-      document.querySelectorAll("[data-mode]").forEach((element) => {
-        element.addEventListener("click", () => {
-          vscode.postMessage({ type: "mode", mode: element.dataset.mode });
-        });
-      });
-      document.querySelectorAll("[data-layout]").forEach((element) => {
-        element.addEventListener("click", () => {
-          vscode.postMessage({ type: "layout", layout: element.dataset.layout });
-        });
-      });
-      document.querySelectorAll("[data-toggle-project]").forEach((element) => {
-        element.addEventListener("click", () => {
-          vscode.postMessage({ type: "toggleProject", cwd: element.dataset.toggleProject });
-        });
-      });
-      document.addEventListener("click", (event) => {
-        if (event.target.closest("[data-menu]") || event.target.closest("[data-menu-panel]")) {
+          vscode.postMessage({ type: action.dataset.action, sessionId });
+          return;
+        }
+        const mode = target?.closest("[data-mode]");
+        if (mode) {
+          vscode.postMessage({ type: "mode", mode: mode.dataset.mode });
+          return;
+        }
+        const layout = target?.closest("[data-layout]");
+        if (layout) {
+          vscode.postMessage({ type: "layout", layout: layout.dataset.layout });
+          return;
+        }
+        const project = target?.closest("[data-toggle-project]");
+        if (project) {
+          vscode.postMessage({ type: "toggleProject", cwd: project.dataset.toggleProject });
+          return;
+        }
+        if (target?.closest("[data-show-more]")) {
+          vscode.postMessage({ type: "showMore" });
+          return;
+        }
+        if (target?.closest("[data-menu-panel]")) {
           return;
         }
         document.querySelectorAll("[data-menu-panel]").forEach((panel) => { panel.hidden = true; });
@@ -783,9 +829,39 @@ class SessionsViewProvider implements vscode.WebviewViewProvider {
         vscode.postMessage({ type: "rename", sessionId: renameSessionId, title });
         closeRenameDialog();
       }
+      function filterSessions(rawQuery) {
+        const query = rawQuery.trim().toLowerCase();
+        let visibleRows = 0;
+        document.querySelectorAll("[data-session-row]").forEach((row) => {
+          const haystack = (row.dataset.search || "").toLowerCase();
+          const visible = !query || haystack.includes(query);
+          row.dataset.filterHidden = visible ? "false" : "true";
+          if (visible) visibleRows += 1;
+        });
+        document.querySelectorAll("[data-project-group]").forEach((group) => {
+          const visibleSessions = group.querySelectorAll('[data-session-row][data-filter-hidden="false"]').length;
+          const groupHaystack = (group.dataset.search || "").toLowerCase();
+          const visible = !query || visibleSessions > 0 || groupHaystack.includes(query);
+          const sessions = group.querySelector(".project-sessions");
+          group.dataset.filterHidden = visible ? "false" : "true";
+          if (sessions) {
+            sessions.hidden = query ? false : group.dataset.collapsed === "true";
+          }
+        });
+        const empty = document.getElementById("searchEmptyState");
+        const visibleGroups = document.querySelectorAll('[data-project-group][data-filter-hidden="false"]').length;
+        if (empty) empty.hidden = visibleRows !== 0 || visibleGroups !== 0 || !query;
+      }
+      filterSessions(search?.value || "");
     </script>
   </body>
 </html>`;
+  }
+
+  private getRenderLimit(): number {
+    return this.mode === "archived"
+      ? this.archivedRenderLimit
+      : Number.POSITIVE_INFINITY;
   }
 }
 
@@ -811,6 +887,11 @@ select
   t.cwd as sqliteCwd,
   t.rollout_path as rolloutPath,
   coalesce(t.updated_at_ms, t.updated_at * 1000) as updatedAtMs,
+  case
+    when t.archived_at is null then null
+    when t.archived_at > 100000000000 then t.archived_at
+    else t.archived_at * 1000
+  end as archivedAtMs,
   t.archived as archived,
   case
     when t.agent_role is not null and trim(t.agent_role) != '' then 1
@@ -819,7 +900,14 @@ select
     else 0
   end as isSubagent
 from threads t
-order by coalesce(t.updated_at_ms, t.updated_at * 1000) desc
+order by case
+  when t.archived = 1 and t.archived_at is not null then
+    case
+      when t.archived_at > 100000000000 then t.archived_at
+      else t.archived_at * 1000
+    end
+  else coalesce(t.updated_at_ms, t.updated_at * 1000)
+end desc
       `.trim(),
       true
     );
@@ -830,7 +918,6 @@ order by coalesce(t.updated_at_ms, t.updated_at * 1000) desc
         continue;
       }
       const rolloutPath = resolveCodexPath(this.codexHome, row.rolloutPath);
-      const metaCwd = await readSessionMetaCwd(rolloutPath).catch(() => null);
       sessions.push({
         id: row.id,
         title: getOfficialDisplayTitle(
@@ -844,9 +931,10 @@ order by coalesce(t.updated_at_ms, t.updated_at * 1000) desc
         source: row.source,
         modelProvider: row.modelProvider,
         sqliteCwd: row.sqliteCwd,
-        metaCwd,
+        metaCwd: null,
         rolloutPath,
-        updatedAt: row.updatedAtMs ? new Date(Number(row.updatedAtMs)).toISOString() : null,
+        updatedAt: timestampMsToIso(row.updatedAtMs),
+        archivedAt: timestampMsToIso(row.archivedAtMs),
         archived: Boolean(row.archived),
         isSubagent: Boolean(row.isSubagent)
       });
@@ -1294,18 +1382,6 @@ select changes() as changedRows;
   }
 }
 
-async function readSessionMetaCwd(rolloutPath: string): Promise<string | null> {
-  const firstLine = await readFirstLine(rolloutPath);
-  if (!firstLine) {
-    return null;
-  }
-  const row = JSON.parse(firstLine) as {
-    type?: string;
-    payload?: { cwd?: string };
-  };
-  return row.type === "session_meta" ? row.payload?.cwd ?? null : null;
-}
-
 async function readSessionIndexThreadNames(codexHome: string): Promise<Map<string, string>> {
   const indexPath = path.join(codexHome, SESSION_INDEX_NAME);
   const names = new Map<string, string>();
@@ -1595,31 +1671,6 @@ async function writeLine(
   }
 }
 
-async function readFirstLine(filePath: string): Promise<string | null> {
-  const handle = await fs.open(filePath, "r");
-  try {
-    const chunks: Buffer[] = [];
-    let position = 0;
-    while (true) {
-      const buffer = Buffer.alloc(64 * 1024);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
-      if (bytesRead === 0) {
-        break;
-      }
-      chunks.push(buffer.subarray(0, bytesRead));
-      const text = Buffer.concat(chunks).toString("utf8");
-      const newline = text.indexOf("\n");
-      if (newline >= 0) {
-        return text.slice(0, newline).replace(/\r$/, "");
-      }
-      position += bytesRead;
-    }
-    return chunks.length ? Buffer.concat(chunks).toString("utf8") : null;
-  } finally {
-    await handle.close();
-  }
-}
-
 async function copyIfExists(source: string, target: string): Promise<boolean> {
   try {
     await fs.copyFile(source, target);
@@ -1637,46 +1688,72 @@ export function renderMain(
   sessions: SessionSummary[],
   mode: ViewMode,
   layout: ListLayout,
-  collapsedProjects: Set<string>
+  collapsedProjects: Set<string>,
+  renderLimit = Number.POSITIVE_INFINITY
 ): string {
+  const visibleSessions = sessions.slice(0, renderLimit);
+  const hasMore = sessions.length > visibleSessions.length;
   const list =
     layout === "project"
-      ? renderProjectGroups(groupSessionsByCwd(sessions, collapsedProjects))
-      : sessions.map((session) => renderSession(session)).join("");
+      ? renderProjectGroups(
+          groupSessionsByCwd(visibleSessions, mode, collapsedProjects),
+          mode
+        )
+      : visibleSessions.map((session) => renderSession(session, mode)).join("");
+  const shownText = hasMore
+    ? `${visibleSessions.length} of ${sessions.length}`
+    : `${sessions.length}`;
   return `
-    <div class="meta">${sessions.length} ${mode === "archived" ? "archived" : "active"} sessions shown.</div>
+    <div class="meta">${shownText} ${mode === "archived" ? "archived" : "active"} sessions shown.</div>
     <div>${list}</div>
+    ${hasMore ? `<button class="secondary show-more" data-show-more type="button">Show ${Math.min(ARCHIVED_PAGE_SIZE, sessions.length - visibleSessions.length)} more</button>` : ""}
+    <div id="searchEmptyState" class="state" hidden>
+      <div class="title">No matching sessions</div>
+      <div class="detail">Try a different title, cwd, id, or rollout search.</div>
+    </div>
   `;
 }
 
-function renderProjectGroups(groups: SessionGroup[]): string {
+function renderProjectGroups(groups: SessionGroup[], mode: ViewMode): string {
   return groups
     .map((group) => {
       const sessions = group.collapsed
         ? ""
-        : group.sessions.map((session) => renderSession(session)).join("");
+        : group.sessions.map((session) => renderSession(session, mode)).join("");
+      const searchText = buildSearchText([
+        group.cwd,
+        ...group.sessions.flatMap((session) => getSessionSearchParts(session))
+      ]);
       return `
-        <section class="project-group">
+        <section class="project-group" data-project-group data-collapsed="${group.collapsed ? "true" : "false"}" data-search="${escapeHtml(searchText)}">
           <button class="project-header" data-toggle-project="${escapeHtml(group.cwd)}" title="${escapeHtml(group.cwd)}">
-            <span>${group.collapsed ? ">" : "v"}</span>
+            <span class="project-chevron ${group.collapsed ? "" : "expanded"}" aria-hidden="true">
+              <svg viewBox="0 0 16 16" focusable="false">
+                <path fill="currentColor" d="M6 4l4 4-4 4z"></path>
+              </svg>
+            </span>
             <span class="project-title">${escapeHtml(group.cwd)}</span>
             <span>(${group.sessions.length})</span>
           </button>
-          ${sessions}
+          <div class="project-sessions" ${group.collapsed ? "hidden" : ""}>${sessions}</div>
         </section>
       `;
     })
     .join("");
 }
 
-function renderSession(session: SessionSummary): string {
+function renderSession(session: SessionSummary, mode: ViewMode): string {
   const cwdLabel = session.sqliteCwd;
+  const searchText = buildSearchText(getSessionSearchParts(session));
+  const displayTime = mode === "archived"
+    ? session.archivedAt ?? session.updatedAt
+    : session.updatedAt;
   return `
-    <div class="session-row">
+    <div class="session-row" data-session-row data-search="${escapeHtml(searchText)}">
       <div class="session">
         <div class="session-main">
           <div class="title">${escapeHtml(session.title)}</div>
-          <div class="meta">${escapeHtml(formatDate(session.updatedAt))} · ${escapeHtml(cwdLabel)}</div>
+          <div class="meta">${escapeHtml(formatDate(displayTime))} · ${escapeHtml(cwdLabel)}</div>
         </div>
         <button class="menu-trigger" data-menu="${escapeHtml(session.id)}" aria-label="Session actions">...</button>
       </div>
@@ -1687,6 +1764,20 @@ function renderSession(session: SessionSummary): string {
       </div>
     </div>
   `;
+}
+
+function getSessionSearchParts(session: SessionSummary): Array<string | null> {
+  return [
+    session.id,
+    session.title,
+    session.sqliteCwd,
+    session.metaCwd,
+    session.rolloutPath
+  ];
+}
+
+function buildSearchText(parts: Array<string | null>): string {
+  return parts.filter((part): part is string => Boolean(part)).join(" ");
 }
 
 function renderState(title: string, detail: string): string {
@@ -1726,6 +1817,7 @@ function normalizeListLayout(value: string | undefined): ListLayout {
 
 export function groupSessionsByCwd(
   sessions: SessionSummary[],
+  mode: ViewMode = "active",
   collapsedProjects = new Set<string>()
 ): SessionGroup[] {
   const groups = new Map<string, SessionSummary[]>();
@@ -1744,21 +1836,32 @@ export function groupSessionsByCwd(
       cwd,
       sessions: groupSessions
         .slice()
-        .sort((first, second) => sessionTimeMs(second) - sessionTimeMs(first)),
+        .sort((first, second) => sessionTimeMs(second, mode) - sessionTimeMs(first, mode)),
       collapsed: collapsedProjects.has(cwd)
     }))
     .sort(
       (first, second) =>
-        sessionTimeMs(second.sessions[0]) - sessionTimeMs(first.sessions[0])
+        sessionTimeMs(second.sessions[0], mode) - sessionTimeMs(first.sessions[0], mode)
     );
 }
 
-function sessionTimeMs(session: SessionSummary | undefined): number {
-  if (!session?.updatedAt) {
+function sessionTimeMs(session: SessionSummary | undefined, mode: ViewMode): number {
+  const timestamp = mode === "archived"
+    ? session?.archivedAt ?? session?.updatedAt
+    : session?.updatedAt;
+  if (!timestamp) {
     return 0;
   }
-  const time = new Date(session.updatedAt).getTime();
+  const time = new Date(timestamp).getTime();
   return Number.isNaN(time) ? 0 : time;
+}
+
+function timestampMsToIso(timestampMs: number | null): string | null {
+  if (!timestampMs) {
+    return null;
+  }
+  const time = Number(timestampMs);
+  return Number.isFinite(time) ? new Date(time).toISOString() : null;
 }
 
 export function matchesOfficialActiveSession(session: SessionSummary): boolean {
